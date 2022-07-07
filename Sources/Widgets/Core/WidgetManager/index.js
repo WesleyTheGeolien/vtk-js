@@ -253,22 +253,32 @@ function vtkWidgetManager(publicAPI, model) {
   // API public
   // --------------------------------------------------------------------------
 
-  async function updateSelection({ position }) {
+  async function updateSelection(callData, releaseLeftButton) {
+    const { position } = callData;
     model._selectionInProgress = true;
     const { requestCount, selectedState, representation, widget } =
       await publicAPI.getSelectedDataForXY(position.x, position.y);
-    model._selectionInProgress = false;
 
     if (requestCount) {
       // Call activate only once
       return;
     }
 
+    function activateHandle(w) {
+      if (releaseLeftButton) {
+        model._interactor.invokeLeftButtonRelease(callData);
+        w.activateHandle({ selectedState, representation });
+        model._interactor.invokeLeftButtonPress(callData);
+      } else {
+        w.activateHandle({ selectedState, representation });
+      }
+    }
+
     // Default cursor behavior
     model._apiSpecificRenderWindow.setCursor(widget ? 'pointer' : 'default');
 
     if (model.widgetInFocus === widget && widget.hasFocus()) {
-      widget.activateHandle({ selectedState, representation });
+      activateHandle(widget);
       // Ken FIXME
       model._interactor.render();
       model._interactor.render();
@@ -276,7 +286,7 @@ function vtkWidgetManager(publicAPI, model) {
       for (let i = 0; i < model.widgets.length; i++) {
         const w = model.widgets[i];
         if (w === widget && w.getNestedPickable()) {
-          w.activateHandle({ selectedState, representation });
+          activateHandle(w);
           model.activeWidget = w;
         } else {
           w.deactivateAllHandles();
@@ -286,40 +296,31 @@ function vtkWidgetManager(publicAPI, model) {
       model._interactor.render();
       model._interactor.render();
     }
+
+    model._selectionInProgress = false;
   }
 
-  const handleEvent = (eventName) => {
-    let guard = false;
-    return (callData) => {
-      if (
-        guard ||
-        model.isAnimating ||
-        !model.pickingEnabled ||
-        model._selectionInProgress
-      ) {
-        return macro.VOID;
+  const handleEvent = (callData, releaseLeftButton) => {
+    if (
+      model.isAnimating ||
+      !model.pickingEnabled ||
+      model._selectionInProgress
+    ) {
+      return;
+    }
+
+    const updatePromise = updateSelection(callData, releaseLeftButton);
+    // const updatePromise = new Promise((resolve) => {
+    //   setTimeout(() => resolve(updateSelection(callData)), 10);
+    // });
+    macro.measurePromiseExecution(updatePromise, (elapsed) => {
+      // 100ms is deemed fast enough. Anything higher can degrade usability.
+      if (elapsed > 100) {
+        macro.vtkWarningMacro(
+          `vtkWidgetManager updateSelection() took ${elapsed}ms`
+        );
       }
-
-      const updatePromise = updateSelection(callData);
-      macro.measurePromiseExecution(updatePromise, (elapsed) => {
-        // 100ms is deemed fast enough. Anything higher can degrade usability.
-        if (elapsed > 100) {
-          macro.vtkWarningMacro(
-            `vtkWidgetManager updateSelection() took ${elapsed}ms on ${eventName}`
-          );
-        }
-      });
-
-      updatePromise.then(() => {
-        if (model._interactor) {
-          // re-trigger the event, ignoring our own handler
-          guard = true;
-          model._interactor[`invoke${eventName}`](callData);
-          guard = false;
-        }
-      });
-      return macro.EVENT_ABORT;
-    };
+    });
   };
 
   function updateWidgetForRender(w) {
@@ -414,13 +415,17 @@ function vtkWidgetManager(publicAPI, model) {
       })
     );
 
-    subscriptions.push(model._interactor.onMouseMove(handleEvent('MouseMove')));
+    subscriptions.push(model._interactor.onMouseMove(handleEvent));
     subscriptions.push(
-      model._interactor.onLeftButtonPress(
-        handleEvent('LeftButtonPress'),
-        // stay after widgets, but before default of 0
-        WIDGET_PRIORITY / 2
-      )
+      model._interactor.onLeftButtonPress((eventData) => {
+        if (
+          eventData.deviceType === 'touch' ||
+          eventData.deviceType === 'pen'
+        ) {
+          handleEvent(eventData, true);
+        }
+        // must be handled prior to button press
+      }, WIDGET_PRIORITY + 0.1)
     );
 
     publicAPI.modified();

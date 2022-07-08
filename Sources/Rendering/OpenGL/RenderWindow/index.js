@@ -90,6 +90,59 @@ function vtkOpenGLRenderWindow(publicAPI, model) {
   // Set our className
   model.classHierarchy.push('vtkOpenGLRenderWindow');
 
+  function createContextHandler() {
+    const cache = new Map();
+
+    const getParameterHandler = {
+      apply(target, gl, args) {
+        if (cache.has(args[0])) {
+          return cache.get(args[0]);
+        }
+        return target.apply(gl, args);
+      },
+    };
+
+    // only supports single-value setters
+    function cachedSetterHandler(key) {
+      return {
+        apply(target, gl, args) {
+          cache.set(key, args[0]);
+          return target.apply(gl, args);
+        },
+      };
+    }
+
+    const propHandlers = {
+      getParameter(gl, prop, receiver, propValue) {
+        return new Proxy(propValue.bind(gl), getParameterHandler);
+      },
+      depthMask(gl, prop, receiver, propValue) {
+        return new Proxy(
+          propValue.bind(gl),
+          cachedSetterHandler(gl.DEPTH_WRITEMASK)
+        );
+      },
+    };
+
+    return {
+      get(gl, prop, receiver) {
+        let ret = Reflect.get(gl, prop, receiver);
+        if (ret instanceof Function) {
+          // prevents Illegal Invocation errors
+          ret = ret.bind(gl);
+        }
+
+        if (prop in propHandlers) {
+          return propHandlers[prop](gl, prop, receiver, ret);
+        }
+
+        return ret;
+      },
+    };
+  }
+
+  const cachingContextHandler = createContextHandler();
+
   publicAPI.getViewNodeFactory = () => model.myFactory;
 
   // prevent default context lost handler
@@ -284,7 +337,7 @@ function vtkOpenGLRenderWindow(publicAPI, model) {
         model.canvas.getContext('experimental-webgl', options);
     }
 
-    return result;
+    return new Proxy(result, cachingContextHandler);
   };
 
   // Request an XR session on the user device with WebXR,
